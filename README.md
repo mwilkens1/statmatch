@@ -19,9 +19,9 @@ This project combines two Eurofound surveys: the European Working Conditions Sur
 
 There is a series of R markdown files
 
-1. **Identification_of_common_variables.Rmd** This is the first step that looks at which variables in both surveys could be considered as equal
-2. **Selection_of_the_matching_variables.Rmd** Second step that checks which of the common variables are strong predictors of the variables of interest
-3. **Statistical_matching.Rmd** Here the actual matching takes place.
+1. [**Identification_of_common_variables.Rmd**](http://htmlpreview.github.io/?https://github.com/mwilkens1/statmatch/blob/master/identification_of_common_variables.html) This is the first step that looks at which variables in both surveys could be considered as equal
+2. [**Selection_of_the_matching_variables.Rmd**](http://htmlpreview.github.io/?https://github.com/mwilkens1/statmatch/blob/master/selection_of_the_matching_variables.html) Second step that checks which of the common variables are strong predictors of the variables of interest
+3. [**Statistical_matching.Rmd**](http://htmlpreview.github.io/?https://github.com/mwilkens1/statmatch/blob/master/statistical_matching.html) Here the actual matching takes place.
 
 ## Results<a name="results"></a>
 
