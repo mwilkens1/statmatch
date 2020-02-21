@@ -1,0 +1,418 @@
+---
+title: "Statistical matching"
+author: "Mathijn Wilkens"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document: 
+    css: custom.css
+    toc: true
+    toc_float: true
+---
+
+```{r libaries, echo=TRUE, message=FALSE, warning=FALSE}
+library(StatMatch)
+library(ggplot2)
+library(MASS)
+library(AER)
+library(reshape2)
+```
+
+```{r colours, message=FALSE, warning=FALSE}
+source("Colours.R")
+```
+
+Datafiles created in 'identification_of_common_variables.R'
+```{r}
+load("EWCS_def.Rda")
+load("EQLS_def.Rda")
+```
+
+#Introduction
+The aim of this step is to do the statistical matching on the basis of the commmon variables identified in the first step. We may have to be more selective in terms of the matching variables used and for that we can use the outcome of the second step. The EQLS will be the recipient dataset as this is the smallest one. EWCS will be the donor file. This setup ensures that there are enough donors available for matching. 
+
+To create a synthetic micro data set, three nonparametric approaches are possible in the package StatMatch: 
+
+1.	Random hot deck: random draws from the donor file within a suitable subset of units. E.g. random draw from all men with a certain age in a certain country, etc.
+2.	Rank hot deck: if one of the matching variables is or should be considered ordinal, units are matched based on rank. E.g. the highest income in set A is matched with highest income in set B.
+3.	Distance hot deck: records are matched according to the smallest distance, e.g. the income in the donor record that comes closest to the recipient record in terms of the difference in Euros. 
+
+The random hot deck procedure allows for matching within donation classes. Given the importance of country as an explanatory variable, and as an element of the survey design, matching will take place within each country. This means that respondents from a certain country in the EQLS can only be matched to respondents from the same country in the EWCS. In addition, having children is also added as a donation class because certain questions in the EQLS are addressed only to people with children. Finally, work-life balance is added as donation class because one aim is to do a regression with work-life balance as a dependent variable on the joint datafile. 
+
+```{r}
+EWCS_varlist <- c("supervisor","y15_Q26","y15_Q30i","y15_Q35e","atypical","regularity","y15_Q38",
+                  "y15_Q40","shiftwork","y15_Q42","y15_Q43","y15_Q46","y15_Q47",
+                  "y15_Q49a","y15_Q49b","pace_det","freq_dis_int","autonomy")
+
+classes <- c("country","child_in_hh","WorkLB")
+
+common_vars_v <- c("Gender","agenum","empl_stat2","urbanisation","ISCO","partner","gen_health","totalhour","education_3cat","who5","commute_time","make_ends_meet","migrant","WorkLB","care_disabled")
+
+#Totalhour is rescaled because of the difference in level between the surveys.
+EWCS$totalhour_s <- (EWCS$totalhour-median(EWCS$totalhour, na.rm=T))/sd(EWCS$totalhour, na.rm=T)   #as.numeric(scale(EWCS$totalhour))
+EQLS$totalhour_s <- (EQLS$totalhour-median(EQLS$totalhour, na.rm=T))/sd(EQLS$totalhour, na.rm=T) #as.numeric(scale(EQLS$totalhour))
+
+EQLS$WorkLB2 <- EQLS$WorkLB
+EQLS$WorkLB2[EQLS$WorkLB<3] <- 0
+EQLS$WorkLB2[EQLS$WorkLB==3] <- 1
+EQLS$WorkLB2 <- droplevels(EQLS$WorkLB2)
+
+EWCS$WorkLB2 <- EWCS$WorkLB
+EWCS$WorkLB2[EWCS$WorkLB<3] <- 0
+EWCS$WorkLB2[EWCS$WorkLB==3] <- 1
+EWCS$WorkLB2 <- droplevels(EWCS$WorkLB2)
+
+nominal <- c("Gender","empl_stat2","urbanisation","ISCO","partner","education_3cat","migrant","care_disabled")
+continuous <- c("agenum","who5","commute_time","totalhour_s")
+ordinal <- c("gen_health","make_ends_meet","WorkLB")
+
+```
+
+##Matching
+
+Matching variables are common variables on which distances between recepient and donor are calculated, within each donor class. E.g. if age is a matching variable, for a group of EQLS respondents in a certain country, with a certain work-life balance and without children, closest donors in the EWCS are those within the same class, but also with a similar age. 
+
+The choice between what to use as a donation class or as a matching variable matters. Using variables as donation classes will ensure they have exactly the same value in the donation dataset for those variables. This is not the case for matching variables. In addition, the more donation classes we add the more likely there will not be enough donors in the same classes and the procedure will throw an error. Going beyond country, WLB and child is already going too far in most cases. 
+
+Also, even if there are enough donors, the distances of the matching variables are likely to grow. This may be acceptable, depending on how important those variables are for the CIA. 
+
+Below, several matching models are implemented. There are four model specifications and all of them use country, work-life balance and having a child in the household as donation classes:
+
+1. Full: this uses all the commmon variables as matching variables, including those which were not particularly relevant for the variables to be matched. 
+2. Important: this uses all the important common variables, based on the variable importance determined in the last step. ISCO, work hours, employment status, age, who5, commuting time and making ends meet. 
+3. Half: this is a reduced version, excluding commuting time and making ends meet.
+4. Minimal: This only includes ISCO and the workhours, so only the most crucial matching variables. 
+
+A few trade-offs are at play here. 
+
+* The more matching variables we add to the model, the more difficult it will be to find close donors in terms of all these variables and the distributions of EQLS recipient and EWCS donor in terms of these variables will be more different. However, the upside is that these variables make the CIA more plausible, if they explain association between the EQLS and EWCS variables of interest. 
+* The less matching variables we add to the model, the more accurately we can match the EQLS and EWCS respondents in terms of the matching variables in the model. However, if we dont include variables crucial to the CIA, this assupmtion becomes less plausible. 
+
+Then, for each model specification there are 4 versions:
+
+1. Constrained to one donor: donors can only be matched once. This is a strict requirement and makes having donation classes of country, work-life balance and chilren in the household impossible because there are not enough donors in each cell. Therefore, childen in the household is now a matching variable and work-life balance is dichotomised to very well versus not very well. 
+2. Constrained to using the same donor not more than twice. Work-life balance is not dichotomised, but children in the household is a matching variable
+3. Constrained to three: the same doner may not be used more than three times and donation classes are not limited in any way
+4. Unconstrained: donors can be redrawn unlimitedly, donation classes are not restricted in any way. 
+
+
+
+For the more constrained versions, we would expect to see that having children in the household does not always have the same value in the EQLS as in the EWCS because we consider it a matching variable. Also for the dichtomised version of work-life balance (version 1) we may see differences within the four categories of work-life balance. For the other models, the donation classes will make sure that the values of these variables are identical for the EWCS donor to the EQLS recipient. 
+
+```{r , message=FALSE, warning=FALSE}
+match.vars.full <-  common_vars_v  
+match.vars.imp  <-  c("ISCO","totalhour_s","empl_stat2","agenum","who5","commute_time","make_ends_meet")    
+match.vars.half <-  c("ISCO","totalhour_s","empl_stat2","agenum","who5")       
+match.vars.min  <-  c("ISCO","totalhour_s")       
+
+#Full set of variables
+match.full.NND.con1 <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                           match.vars=c(match.vars.full,"child_in_hh","WorkLB"), don.class=c("country","WorkLB2"), 
+                          weight.don="w4", dist.fun="Gower", constrained = TRUE, constr.alg="lpSolve")
+
+match.full.NND.con2 <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                           match.vars=c(match.vars.full,"child_in_hh"), don.class=c("country","WorkLB"), 
+                          weight.don="w4", dist.fun="Gower", constrained= TRUE, k=2,constr.alg="lpSolve")
+
+match.full.NND.con3 <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                           match.vars=match.vars.full, don.class=c("country","WorkLB","child_in_hh"), 
+                          weight.don="w4", dist.fun="Gower", constrained= TRUE, k=3,constr.alg="lpSolve")
+
+match.full.NND.unc <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                          match.vars=match.vars.full, don.class=c("country","WorkLB","child_in_hh"), 
+                          weight.don="w4", dist.fun="Gower")
+
+#Most important variables
+match.imp.NND.con1 <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                           match.vars=c(match.vars.imp,"child_in_hh","WorkLB"), don.class=c("country","WorkLB2"), 
+                          weight.don="w4", dist.fun="Gower", constrained = TRUE, constr.alg="lpSolve")
+
+match.imp.NND.con2 <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                           match.vars=c(match.vars.imp,"child_in_hh"), don.class=c("country","WorkLB"), 
+                          weight.don="w4", dist.fun="Gower", constrained= TRUE, k=2,constr.alg="lpSolve")
+
+match.imp.NND.con3 <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                           match.vars=match.vars.imp, don.class=c("country","WorkLB","child_in_hh"), 
+                          weight.don="w4", dist.fun="Gower", constrained= TRUE, k=3,constr.alg="lpSolve")
+
+match.imp.NND.unc <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                          match.vars=match.vars.imp, don.class=c("country","WorkLB","child_in_hh"), 
+                          weight.don="w4", dist.fun="Gower")
+
+#Half set of variables
+match.half.NND.con1 <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                           match.vars=c(match.vars.half,"child_in_hh","WorkLB"), don.class=c("country","WorkLB2"), 
+                          weight.don="w4", dist.fun="Gower", constrained = TRUE, constr.alg="lpSolve")
+
+match.half.NND.con2 <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                           match.vars=c(match.vars.half,"child_in_hh"), don.class=c("country","WorkLB"), 
+                          weight.don="w4", dist.fun="Gower", constrained= TRUE, k=2,constr.alg="lpSolve")
+
+match.half.NND.con3 <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                           match.vars=match.vars.half, don.class=c("country","WorkLB","child_in_hh"), 
+                          weight.don="w4", dist.fun="Gower", constrained= TRUE, k=3,constr.alg="lpSolve")
+
+match.half.NND.unc <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                          match.vars=match.vars.half, don.class=c("country","WorkLB","child_in_hh"), 
+                          weight.don="w4", dist.fun="Gower")
+
+#Minimal set of variables
+match.min.NND.con1 <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                           match.vars=c(match.vars.min,"child_in_hh","WorkLB"), don.class=c("country","WorkLB2"), 
+                          weight.don="w4", dist.fun="Gower", constrained = TRUE, constr.alg="lpSolve")
+
+match.min.NND.con2 <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                           match.vars=c(match.vars.min,"child_in_hh"), don.class=c("country","WorkLB"), 
+                          weight.don="w4", dist.fun="Gower", constrained= TRUE, k=2,constr.alg="lpSolve")
+
+match.min.NND.con3 <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                           match.vars=match.vars.min, don.class=c("country","WorkLB","child_in_hh"), 
+                          weight.don="w4", dist.fun="Gower", constrained= TRUE, k=3,constr.alg="lpSolve")
+
+match.min.NND.unc <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                          match.vars=match.vars.min, don.class=c("country","WorkLB","child_in_hh"), 
+                          weight.don="w4", dist.fun="Gower")
+
+EWCS$x <- 1
+EQLS$x <- 1
+
+#Completely random 
+match.random.con1  <- NND.hotdeck(data.rec=EQLS, data.don=EWCS,
+                          match.vars="x", don.class="country", 
+                          weight.don="w4", constrained= TRUE)
+
+
+```
+
+## Duplicate donors
+
+```{r}
+
+matchmodels <- list(
+  full.NND.con1=match.full.NND.con1,
+  full.NND.con2=match.full.NND.con2,
+  full.NND.con3=match.full.NND.con3,
+  full.NND.unc =match.full.NND.unc,
+  imp.NND.con1=match.imp.NND.con1,
+  imp.NND.con2=match.imp.NND.con2,
+  imp.NND.con3=match.imp.NND.con3,
+  imp.NND.unc =match.imp.NND.unc,
+  half.NND.con1=match.half.NND.con1,
+  half.NND.con2=match.half.NND.con2,
+  half.NND.con3=match.half.NND.con3,
+  half.NND.unc =match.half.NND.unc,
+  min.NND.con1 =match.min.NND.con1,
+  min.NND.con2 =match.min.NND.con2,
+  min.NND.con3 =match.min.NND.con3,
+  min.NND.unc  =match.min.NND.unc,
+  random.NND.con1 =match.random.con1
+)
+
+dups <-  data.frame(do.call(rbind,lapply(matchmodels, function(i) {
+           sum(table(i$mtc.ids[,2])-1)/nrow(i$mtc.ids)
+         })))
+colnames(dups) <- "share" 
+dups$model <- rownames(dups)
+rownames(dups) <- NULL
+
+dups_by <- do.call(cbind, lapply(matchmodels, function(i) {
+                                    x <- i$mtc.ids[,2]
+                                    x <- table(table(x)-1)
+                                    l <- length(x)
+                                    if (l<=6) {
+                                      length(x) <- 7
+                                      x[(l+1):7] <- 0
+                                      names(x) <- c("0","1","2","3","4","5","6")
+                                    }
+                                    df <- data.frame(x)
+                                    if (l<=6){
+                                      df$Var1 <- factor(rownames(df), levels=c(0:6), labels=c("0","1","2","3","4","5","6"))
+                                      df$Freq <- df$x
+                                      df <- df[,2:3]
+                                    }
+                                    df$f             <- as.numeric(df$Var1)-1
+                                    df$f[df$f>=6]    <- 6
+                                    df <- aggregate(df[,2:3], by=list(df$f), FUN=sum)[,2]
+                                    }))
+dups_by <- as.data.frame(dups_by) 
+dups_by$dups <- factor(rownames(dups_by), levels=c(1:7), labels=c("0","1","2","3","4","5","6+"))
+dups_by[is.na(dups_by)] <- 0
+
+#Occurance of the number of duplicates (0=unique donor)
+ggplot(dups, aes(x=model, y=share), colour=EF_blue) +
+  geom_bar(stat="identity", fill=EF_blue) +
+  coord_flip() +
+  theme_minimal()
+
+#dups_by <- melt(dups_by)
+#ggplot(dups_by, aes(x=dups, y=value, fill=variable)) + 
+#  geom_bar(stat="identity", position="dodge") +
+#  theme_minimal()
+
+```
+
+### Creating fused data sets
+
+```{r}
+EWCS$concentrate2 <- EWCS$concentrate
+EWCS$too_tired2 <- EWCS$too_tired
+EWCS$fam_resp2 <- EWCS$fam_resp
+
+fused <- lapply(matchmodels, function(mm) {
+              df <- create.fused(data.rec=EQLS, data.don=EWCS,
+                                      mtc.ids=mm$mtc.ids,
+                                      z.vars=c(EWCS_varlist,"concentrate2","too_tired2","fam_resp2"),
+                                      dup.x=T, match.vars=c(match.vars.full,"country","WorkLB","child_in_hh"))
+})
+
+```
+
+##Evaluation
+
+1. Bias and variance of matched variables compared to their original distributions in the EWCS
+2. Assocation of matched variables with EQLS variables: pw.assoc(formula, data, weights=NULL, freq0c=NULL)
+3. Test differences between matching variables on matched dataset
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+EWCS_varlist_c <- c("supervisor","y15_Q30i","y15_Q35e","regularity","y15_Q38",
+                  "y15_Q40","shiftwork","y15_Q42","y15_Q43","y15_Q46","y15_Q47",
+                  "y15_Q49a","y15_Q49b","freq_dis_int")
+
+lv <- list("supervisor","y15_Q30i","y15_Q35e","regularity","y15_Q38",
+                  "y15_Q40","shiftwork","y15_Q42","y15_Q43","y15_Q46","y15_Q47",
+                  "y15_Q49a","y15_Q49b","freq_dis_int")
+
+cp<- sapply(fused, function(X) { 
+              sapply(lv, function(Y){
+                        i <- table(X[[Y]]) 
+                        j <- table(EWCS[[Y]])
+                        comp.prop(i, j, n1=length(X[[Y]]), n2=length(EWCS[[Y]]), ref=TRUE)},simplify=T
+        )},simplify=F)
+
+
+t <- lapply(cp,function(x){do.call(rbind,x[1,])})
+t <- data.frame(do.call(rbind,t))
+t$var <- EWCS_varlist_c
+t <- t[order(t$var),]
+t$mm <- names(matchmodels)
+
+c <- lapply(cp,function(x){do.call(rbind,x[2,])})
+c <- data.frame(do.call(rbind,c))
+c$var <- EWCS_varlist_c
+c <- c[order(c$var),]
+c$mm <- names(matchmodels)
+c$p.value <- pchisq(c$Pearson,c$df)
+
+compprop <- merge(t,c[,5:7], by=c("mm","var"))
+compprop$sig <- compprop$p.value < 0.05
+
+compprop$selection[grepl("full",compprop$mm)==T] <- "Full"
+compprop$selection[grepl("imp",compprop$mm)==T] <- "Important"
+compprop$selection[grepl("half",compprop$mm)==T] <- "Half"
+compprop$selection[grepl("min",compprop$mm)==T] <- "Minimal"
+compprop$selection[grepl("random",compprop$mm)==T] <- "Random"
+
+compprop$constraint[grepl("con1",compprop$mm)==T] <- "k=1"
+compprop$constraint[grepl("con2",compprop$mm)==T] <- "k=2"
+compprop$constraint[grepl("con3",compprop$mm)==T] <- "k=3"
+compprop$constraint[grepl("unc",compprop$mm)==T]  <- "Unconstrained"
+
+ggplot(compprop, aes(x=Hell,y=var,colour=selection)) +
+  geom_point(stat="identity", size=3) +
+  facet_wrap(~constraint) +
+  scale_colour_manual(values=EF_5c) +
+  labs(x="Hellinger's distance", y=NULL) +
+  theme_light()
+
+```
+
+```{r message=FALSE, warning=FALSE}
+
+EWCS_varlist_formula <- "~supervisor+y15_Q30i+y15_Q35e+regularity+y15_Q38+y15_Q40+shiftwork+y15_Q42+y15_Q43+y15_Q46+y15_Q47+y15_Q49a+y15_Q49b+freq_dis_int"
+EQLS_list <- list("Y16_Q58d","Y16_Q58e","childcare","Y16_Q82","Y16_Q68a","Y16_Q68b","Y16_Q68c")
+EQLS_vars <- c("Y16_Q58d","Y16_Q58e","childcare","Y16_Q78","Y16_Q82","Y16_Q68a","Y16_Q68b","Y16_Q68c")
+EQLS_varlist2 <- c("Y16_Q58d","Y16_Q58e","childcare","Y16_Q82","Y16_Q68a","Y16_Q68b","Y16_Q68c")
+
+pw <- sapply(fused, function(X) { 
+                sapply(EQLS_list, function(Y){
+                   varlist <- unlist(c(Y[1],EWCS_varlist_c))
+                   df <- data.frame(X[,varlist])
+                   df <- df[complete.cases(df),]
+                   pw.assoc(as.formula(paste0(Y,EWCS_varlist_formula)), data=df)$V},simplify=T)},simplify=T)
+
+pw <- data.frame(pw)
+pw$EWCSvar <-   EWCS_varlist_c
+pw <- pw[order(pw$EWCSvar),]
+pw$EQLSvar <- EQLS_varlist2 
+
+pw <- melt(pw, id.vars=c("EQLSvar","EWCSvar"))
+
+pw$mm <- pw$variable
+
+pw$selection[grepl("full",pw$mm)==T] <- "Full"
+pw$selection[grepl("imp",pw$mm)==T] <- "Important"
+pw$selection[grepl("half",pw$mm)==T] <- "Half"
+pw$selection[grepl("min",pw$mm)==T] <- "Minimal"
+pw$selection[grepl("random",pw$mm)==T] <- "Random"
+
+pw$constraint[grepl("con1",pw$mm)==T] <- "k=1"
+pw$constraint[grepl("con2",pw$mm)==T] <- "k=2"
+pw$constraint[grepl("con3",pw$mm)==T] <- "k=3"
+pw$constraint[grepl("unc",pw$mm)==T]  <- "Unconstrained"
+
+ggplot(pw, aes(x=selection,y=value,fill=constraint)) +
+   coord_flip() +
+  geom_boxplot() +
+  scale_fill_manual(values=EF_4c) +
+  labs(y="Cramer's V", x=NULL) + 
+  theme_light() 
+
+
+```
+
+
+```{r message=FALSE, warning=FALSE}
+
+EWCS_varlist_c <- c("too_tired2","fam_resp2","concentrate2")
+
+EWCS_varlist_formula <- "~too_tired2+fam_resp2+concentrate2"
+
+EQLS_list <- list("Y16_Q20a","Y16_Q20b","Y16_Q20c")
+
+EQLS_varlist2 <- c("Y16_Q20a","Y16_Q20b","Y16_Q20c")
+
+pw <- sapply(fused, function(X) { 
+                sapply(EQLS_list, function(Y){
+                   varlist <- unlist(c(Y[1],EWCS_varlist_c))
+                   df <- data.frame(X[,varlist])
+                   df <- df[complete.cases(df),]
+                   pw.assoc(as.formula(paste0(Y,EWCS_varlist_formula)), data=df)$V},simplify=T)},simplify=T)
+
+pw <- data.frame(pw)
+pw$EWCSvar <-   EWCS_varlist_c
+pw <- pw[order(pw$EWCSvar),]
+pw$EQLSvar <- EQLS_varlist2 
+
+pw <- melt(pw, id.vars=c("EQLSvar","EWCSvar"))
+
+pw$mm <- pw$variable
+
+pw$selection[grepl("full",pw$mm)==T] <- "Full"
+pw$selection[grepl("imp",pw$mm)==T] <- "Important"
+pw$selection[grepl("half",pw$mm)==T] <- "Half"
+pw$selection[grepl("min",pw$mm)==T] <- "Minimal"
+pw$selection[grepl("random",pw$mm)==T] <- "Random"
+
+pw$constraint[grepl("con1",pw$mm)==T] <- "k=1"
+pw$constraint[grepl("con2",pw$mm)==T] <- "k=2"
+pw$constraint[grepl("con3",pw$mm)==T] <- "k=3"
+pw$constraint[grepl("unc",pw$mm)==T]  <- "Unconstrained"
+
+ggplot(pw, aes(x=selection,y=value,colour=constraint)) +
+  facet_wrap(~constraint) +
+   coord_flip() +
+  geom_point() +
+  scale_fill_manual(values=EF_4c) +
+  labs(y="Cramer's V", x=NULL) + 
+  theme_light() 
+
+```

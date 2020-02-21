@@ -1,0 +1,435 @@
+---
+title: "Selection of matching variables"
+author: "Mathijn Wilkens"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document: 
+    css: custom.css
+    toc: true
+    toc_float: true
+---
+
+#Introduction
+The previous step (identification of common variables) resulted in a list of potential variables X that could be used for matching. The aim of this step is to assess which of those variables X are relevant for variables that are not common to both surveys, variables Y and Z. When considering which matching variables to choose, two conditions should be satisfied:
+
+* The matching variables should be good predictors of the Y variables; the variables unique to the EWCS that will be matched the EQLS. Common variables that have no explanatory power whatsoever will add no value over a simple random matching procedure
+* The matching variables should satisfy the conditional independence assumption. In other words, association between Y and Z controlled for X should be zero. This cannot be tested, but becomes more plausible the more the common variables are predictive of Y and Z. 
+
+We are only dealing with assocation here, causality is not relevant for matching. Also, the hot deck matching procedure allows for all sorts of non-linear associations with the matching variables and Y and Z. Therefore, random forest seems the appropriate tool to select the matching variables. 
+
+![](statmatch.png)
+
+
+```{r libaries, echo=TRUE, message=FALSE, warning=FALSE}
+library(randomForest)
+library(reshape2)
+library(ggplot2)
+```
+
+```{r colours, message=FALSE, warning=FALSE}
+source("Colours.R")
+```
+
+Datafiles created in 'identification_of_common_variables.R'
+```{r}
+load("EWCS.Rda")
+load("EQLS.Rda")
+```
+
+Function for randomforest on all Y and Z variables with all the potential matching variables as input. Mean decrease in accuracy (i.e. the decrease in accuracy of the model of the variable is removed) will show which common variables are important for predicting each Y and Z variable. 
+
+#Random forest
+##Random forest for EQLS
+
+Defining the common variables that can potentially be used as matching variables
+
+```{r}
+common_vars <- " ~Gender+agenum+empl_stat2+country+urbanisation+ISCO+partner_child+gen_health+totalhour+education_3cat+who5+commute_time+make_ends_meet+migrant+WorkLB+care_disabled"
+common_vars_v <- c("Gender","agenum","empl_stat2","country","urbanisation","ISCO","partner_child","gen_health","totalhour","education_3cat","who5","commute_time","make_ends_meet","migrant","WorkLB","care_disabled")
+
+```
+
+Random forest (regression and classification trees) on the following EQLS variables of interest:
+
+* Q58d: In general, how would you rate the quality of each of the following public services in your country? Child care services (1-10)
+* Q58e: In general, how would you rate the quality of each of the following public services in your country? Long term care services (1-10)
+* Q79: You mentioned that the childcare mainly received by the youngest child is [answer Q78]. How many hours per week is it used? (number of hours) (only for people with children using formal childcare)
+* childcare: respondents children or children in the household use childcare (only for people with children)
+* Q78: What is the main type of childcare received by the youngest child (outside of regular school hours)? (five types of childminding)
+* Q82: To what extent did cost make it difficult for you to use childcare services? (Very difficult, a little diffficult, not difficult at all) (only for people with children using formal childcare)
+* Q68a: Have you, or someone close to you, used the following services in the last 12 months? Here we are asking about formal services, not care provided by families. Nursing care services at your/this person’s home (yes I have, yes someone close to me has, nobody has)
+* Q68b: Have you, or someone close to you, used the following services in the last 12 months? Here we are asking about formal services, not care provided by families. Home help or personal care services in your/this person’s home (yes I have, yes someone close to me has, nobody has)
+* Q68c: Have you, or someone close to you, used the following services in the last 12 months? Here we are asking about formal services, not care provided by families. Residential care or nursing home (yes I have, yes someone close to me has, nobody has)
+
+```{r}
+EQLS$Y16_Q47a <- droplevels(EQLS$Y16_Q47a)
+EQLS$Y16_Q58d <- as.numeric(EQLS$Y16_Q58d)
+EQLS$Y16_Q58e <- as.numeric(EQLS$Y16_Q58e)
+EQLS$childcare[EQLS$Y16_Q77_1==" Mentioned"] <- 1
+EQLS$childcare[EQLS$Y16_Q77_2==" Mentioned"] <- 1
+EQLS$childcare[EQLS$Y16_Q77_3==" Mentioned"] <- 1
+EQLS$childcare[EQLS$Y16_Q77_4==" Mentioned"] <- 0
+EQLS$childcare <- factor(EQLS$childcare,levels=c(0,1),labels=c("No childcare used","childcare used"))
+EQLS$Y16_Q79 <- as.numeric(EQLS$Y16_Q79)
+
+EQLS_varlist <- c("Y16_Q58d","Y16_Q58e","Y16_Q79","childcare","Y16_Q78","Y16_Q82",
+                  "Y16_Q68a","Y16_Q68b","Y16_Q68c")
+
+```
+
+
+```{r ,eval=FALSE, cache=TRUE}
+OOB_EQLS <- data.frame(EQLS_varlist)
+OOB_EQLS$x <- as.numeric(NA)
+OOB_EQLS$measure <- "OOB"
+OOB_EQLS$measure <- factor(OOB_EQLS$measure, levels=c("OOB","rsq"))
+OOB_EQLS$numlevels <- as.numeric(NA)
+
+var_imp_EQLS <- sapply(EQLS_varlist, FUN=function(var) {
+                      rf <- randomForest(
+                                as.formula(paste0(var,common_vars)), 
+                                data=EQLS, na.action=na.omit, importance=T)
+                      var.imp <- data.frame(cbind(importance(rf, type=1),importance(rf, type=2)))
+                      var.imp$n <- length(rf$y)
+                      if (rf$type=="regression") {
+                        OOB_EQLS[match(var,EQLS_varlist),2] <<- rf$rsq[500]
+                        OOB_EQLS[match(var,EQLS_varlist),3] <<- "rsq"
+                        OOB_EQLS[match(var,EQLS_varlist),4] <<- 0
+                      } else {
+                        OOB_EQLS[match(var,EQLS_varlist),2] <<- rf$err.rate[500,1]
+                        OOB_EQLS[match(var,EQLS_varlist),3] <<- "OOB"
+                        OOB_EQLS[match(var,EQLS_varlist),4] <<- length(levels(EQLS$var))
+                      }
+                      message(paste(var,"done"))
+                      var.imp
+                      })
+
+save(var_imp_EQLS,file="var_imp_EQLS.Rda")
+save(OOB_EQLS, file="OOB_EQLS.Rda")
+```
+
+```{r, include=FALSE}
+#Loads results of random forest chunk so that it doesnt need to be ran again every time the document is knitted
+load("var_imp_EQLS.Rda")
+load("OOB_EQLS.Rda")
+```
+
+```{r}
+OOB_EQLS$x[OOB_EQLS$measure=="OOB"] <- 1 - OOB_EQLS$x 
+OOB_EQLS <- OOB_EQLS[order(OOB_EQLS$x),]
+OOB_EQLS$EQLS_varlist <- factor(OOB_EQLS$EQLS_varlist, levels = OOB_EQLS$EQLS_varlist[order(OOB_EQLS$x)])
+ggplot(OOB_EQLS, aes(y=EQLS_varlist, x=x)) +
+  geom_segment(aes(x = 0, 
+                   y = EQLS_varlist, 
+                   yend = EQLS_varlist, 
+                   xend = x), 
+               color = "black") + 
+  geom_point(stat='identity', size=5, aes(colour=measure)) +
+ scale_colour_manual(values=EF_2c) +
+ # labs(title="1-OOB error rate or R-squared EQLS variables") +
+  theme_minimal() + theme(axis.title = element_blank()) +  theme(legend.position = c(0.9, 0.1)) 
+
+```
+
+The chart above shows that the common variables can predict the use of childcare, the type of childcare (Q78) and effects of costs (Q82) very well. For the use of services we get reasonable predictions, e.g. for Q68a roughly 75% of the answers are predicted correctly and this is 50% fo Q68b. Because these questions have three categories guessing would give us a 33% accuracy. For the continuous variables we explain roughly 17% of the variance. Keep in mind that some of the variables are based on subselections so will have a smaller sample size. 
+
+The high predictive power of the commmon variables for most of the EQLS variables makes the CIA more plausible. 
+
+##Random forest for EWCS
+
+Random forest (regression and classification trees) on the following EWCS variables of interest:
+
+* Supervisor: being a supervisor or not
+* Q26: How many days per week do you usually work in your main paid job? (number)
+* Q30i: Does your mean paid job involve: Working with computers, laptops, smartphones etc. (7pt scale all of the time to never)
+* Q35e: how often you have worked in your own home (5pt scale)
+* atypical: index of atypical working time patterns (night, weekends, etc) (scale 0-100)
+* regularity: regularity of working hours (same day, same week, etc) (low, medium, high)
+* Q38: In the last month, has it happened at least once that you had less than 11 hours between the end of one working day and the start of the next working day? (Y/N)
+* Q40: Over the last 12 months, how often have you been requested to come into work at short notice? (5pt scale)
+* shiftwork: type of shiftwork (4 categories)
+* Q42: How are your working time arrangements set? (4 categories)
+* Q43: Do changes to your working time arrangements occur regularly? (5 categories) (only if fixed schedule)
+* Q46: Over the last 12 months, how often have you worked in your free time to meet work demands? (5pt scale)
+* Q47: Would you say that for you arranging to take an hour or two off during working hours to take care of personal or family matters is... (4 pt scale very east to very difficult)
+* Q49a: does your job involve working at very high speed? (7pt scale)
+* Q49b: does your job involve working to tight deadlines? (7pt scale)
+* pace_det_3: having more than 3 pace determinants (Y/N)
+* freq_dis_int: having frequent disruptive interruptions or not (Y/N)
+* Autonomy: scale of autonomy at work (0-100)
+
+```{r}
+
+EWCS$y15_Q26 <- as.numeric(EWCS$y15_Q26)
+EWCS$y15_Q43[EWCS$y15_Q43=="Other (spontaneous)           "] <- NA
+EWCS$y15_Q43 <- droplevels(EWCS$y15_Q43)
+EWCS$freq_dis_int <- factor(EWCS$freq_dis_int, levels=c(0,1), labels=c("No","Yes")) 
+EWCS$pace_det_3 <- factor(EWCS$pace_det_3, levels=c(0,1), labels=c("No","Yes"))
+
+EWCS_varlist <- c("supervisor","y15_Q26","y15_Q30i","y15_Q35e",
+                  "atypical","regularity","y15_Q38",
+                  "y15_Q40","shiftwork","y15_Q42","y15_Q43","y15_Q46","y15_Q47",
+                  "y15_Q49a","y15_Q49b","pace_det","freq_dis_int","autonomy")
+```
+
+```{r , eval=FALSE, cache=TRUE}
+OOB_EWCS <- data.frame(EWCS_varlist)
+OOB_EWCS$x <- as.numeric(NA)
+OOB_EWCS$measure <- "OOB"
+OOB_EWCS$measure <- factor(OOB_EWCS$measure, levels=c("OOB","rsq"))
+OOB_EWCS$numlevels <- as.numeric(NA)
+
+var_imp_EWCS <- sapply(EWCS_varlist, FUN=function(var) {
+                      rf <- randomForest(
+                                as.formula(paste0(var,common_vars)), 
+                                data=EWCS, na.action=na.omit, importance=T)
+                      var.imp <- data.frame(cbind(importance(rf, type=1),importance(rf, type=2)))
+                      var.imp$n <- length(rf$y)
+                      if (rf$type=="regression") {
+                        OOB_EWCS[match(var,EWCS_varlist),2] <<- rf$rsq[500]
+                        OOB_EWCS[match(var,EWCS_varlist),3] <<- "rsq"
+                        OOB_EWCS[match(var,EWCS_varlist),4] <<- 0
+                      } else {
+                        OOB_EWCS[match(var,EWCS_varlist),2] <<- rf$err.rate[500,1]
+                        OOB_EWCS[match(var,EWCS_varlist),3] <<- "OOB"
+                        OOB_EWCS[match(var,EWCS_varlist),4] <<- length(levels(EWCS$var))
+                      }
+                      message(paste(var,"done"))
+                      var.imp
+                      })
+
+save(var_imp_EWCS,file="var_imp_EWCS.Rda")
+save(OOB_EWCS, file="OOB_EWCS.Rda")
+```
+
+```{r, include=FALSE}
+#Loads results of random forest chunk so that it doesnt need to be ran again every time the document is knitted
+load("var_imp_EWCS.Rda")
+load("OOB_EWCS.Rda")
+```
+
+```{r}
+OOB_EWCS$x[OOB_EWCS$measure=="OOB"] <- 1 - OOB_EWCS$x 
+OOB_EWCS <- OOB_EWCS[order(OOB_EWCS$x),]
+OOB_EWCS$EWCS_varlist <- factor(OOB_EWCS$EWCS_varlist, levels = OOB_EWCS$EWCS_varlist[order(OOB_EWCS$x)])
+ggplot(OOB_EWCS, aes(y=EWCS_varlist, x=x)) +
+  geom_segment(aes(x = 0, 
+                   y = EWCS_varlist, 
+                   yend = EWCS_varlist, 
+                   xend = x), 
+               color = "black") + 
+  geom_point(stat='identity', size=5, aes(colour=measure)) +
+  scale_colour_manual(values=EF_2c) +
+ # labs(title="1-OOB error rate or R-squared EWCS variables") +
+  theme_minimal() + theme(axis.title = element_blank()) +  theme(legend.position = c(0.9, 0.1)) 
+
+```
+
+Chart above shows that that the accuracy is reasonably well for most variables, taking into account the different number of categories per variable. 
+
+#Variable importance
+
+This section shows the variable importance of the explanatory variables in all the models. The analysis above shows the predictive power of the combination of the variables included in the models, and below is shown what each variable contributes to this. This is measured by the mean decrease in accuracy, which measures how much more faulty predictions we would get if we would remove a particular variable from the model. The mean decrease in gini is similar, but is a measurement of how important the variables are for splitting the trees. For both statistics, a higher value indicates a higher variable importance. Those variables that consistently show high variable importance should be candidates for matching variables. 
+
+```{r}
+
+df_varimp_ewcs <- data.frame()
+for (i in 1:length(EWCS_varlist)) {
+  df <- as.data.frame(var_imp_EWCS[,i])
+  df$variable <- EWCS_varlist[i]
+  df$var <- common_vars_v
+  df_varimp_ewcs <- rbind(df_varimp_ewcs,df)
+}
+
+df_varimp_eqls <- data.frame()
+for (i in 1:length(EQLS_varlist)) {
+  df <- as.data.frame(var_imp_EQLS[,i])
+  df$variable <- EQLS_varlist[i]
+  df$var <- common_vars_v
+  df_varimp_eqls <- rbind(df_varimp_eqls,df)
+}
+
+df1 <- cbind(
+          aggregate(df_varimp_ewcs[,1], list(df_varimp_ewcs$var), mean),
+          aggregate(df_varimp_ewcs[,2], list(df_varimp_ewcs$var), mean))
+df1 <- df1[,-3]
+names(df1) <- c("var","MeanDecreaseAccuracy","MeanDecreaseGini")
+df1$survey <- "EWCS"
+df1 <- melt(df1)
+
+df2 <- cbind(
+          aggregate(df_varimp_eqls[,1], list(df_varimp_eqls$var), mean),
+          aggregate(df_varimp_eqls[,2], list(df_varimp_eqls$var), mean))
+df2 <- df2[,-3]
+names(df2) <- c("var","MeanDecreaseAccuracy","MeanDecreaseGini")
+df2$survey <- "EQLS"
+df2 <- melt(df2)
+
+df1_med <- cbind(
+          aggregate(df_varimp_ewcs[,1], list(df_varimp_ewcs$var), median),
+          aggregate(df_varimp_ewcs[,2], list(df_varimp_ewcs$var), median))
+df1_med <- df1_med[,-3]
+names(df1_med) <- c("var","MeanDecreaseAccuracy","MeanDecreaseGini")
+df1_med$survey <- "EWCS"
+df1_med <- melt(df1_med)
+
+df2_med <- cbind(
+          aggregate(df_varimp_eqls[,1], list(df_varimp_eqls$var), median),
+          aggregate(df_varimp_eqls[,2], list(df_varimp_eqls$var), median))
+df2_med <- df2_med[,-3]
+names(df2_med) <- c("var","MeanDecreaseAccuracy","MeanDecreaseGini")
+df2_med$survey <- "EQLS"
+df2_med <- melt(df2_med)
+
+
+```
+
+##EWCS
+Figure below is an overview of variable importance for all the models (EWCS)
+
+``` {r, fig.height = 30, fig.width = 14}
+
+df_varimp_ewcs_m <- melt(df_varimp_ewcs[,-3])
+colnames(df_varimp_ewcs_m) <- c("variable","cvariable","stat","value")
+ggplot(df_varimp_ewcs_m, aes(x=value,y=cvariable)) +
+  facet_wrap(variable~stat, scales="free",ncol=4) +
+  geom_segment(aes(x = 0, 
+                   y = cvariable, 
+                   yend = cvariable, 
+                   xend = value), 
+               size = 0.5,
+               color = "black") + 
+  geom_point(stat='identity', size=3, colour=EF_orange) +
+  labs(title="EWCS: Variable importance for random forest") +
+  theme_minimal() + theme(axis.title.y = element_blank())
+```
+
+To summarise, the mean of the statistics over the dependent variables is shown, then the box plot and then the median. 
+
+```{r}
+ggplot(df1, aes(x=value,y=var)) +
+  facet_wrap(~variable, scales="free") +
+  geom_segment(aes(x = 0, 
+                   y = var, 
+                   yend = var, 
+                   xend = value), 
+               color = "black") + 
+  geom_point(stat='identity', size=5, colour=EF_orange) +
+  labs(title="EWCS: Variable importance for random forest",
+       subtitle="Showing mean of mean decrease accuracy and mean decrease gini over the variables") +
+  theme_minimal() + theme(axis.title.y = element_blank())
+
+```
+
+The means show that country, ISCO and totalhours are the most important explanatory variables for the EWCS variables. Other variables are of less importance, and the mean descrease accuracy shows some differences with mean decrease gini, but empl_stat2, agenum, who5, commuting time and WorkLB also seem important. 
+
+```{r}
+ggplot(df_varimp_ewcs_m, aes(x=cvariable,y=value))+
+  facet_wrap(~stat, scales="free") +
+   geom_boxplot(fill=EF_orange) + 
+   coord_flip() + 
+   labs(title="EWCS: Variable importance for random forest") +
+   theme_minimal() + theme(axis.title.y = element_blank())
+```
+
+Boxplot shows roughly the same for mean decrease in accuracy. The scaling of the gini chart is messed up because of outliers. The extreme outlier seems to be the variable country in the random forest for autonomy. 
+
+```{r}
+ggplot(df1_med, aes(x=value,y=var)) +
+  facet_wrap(~variable, scales="free") +
+  geom_segment(aes(x = 0, 
+                   y = var, 
+                   yend = var, 
+                   xend = value), 
+               color = "black") + 
+  geom_point(stat='identity', size=5, colour=EF_orange, shape=15) +
+  labs(title="EWCS: Variable importance for random forest",
+       subtitle="Showing median of mean decrease accuracy and mean decrease gini over the variables") +
+  theme_minimal() + theme(axis.title.y = element_blank())
+```
+
+Just looking at the medians confirms the conclusions above. 
+
+##EQLS
+
+```{r, fig.height = 20, fig.width = 14}
+
+df_varimp_eqls_m <- melt(df_varimp_eqls[,-3])
+colnames(df_varimp_eqls_m) <- c("variable","cvariable","stat","value")
+ggplot(df_varimp_eqls_m, aes(x=value,y=cvariable)) +
+  facet_wrap(variable~stat, scales="free",ncol=4) +
+  geom_segment(aes(x = 0, 
+                   y = cvariable, 
+                   yend = cvariable, 
+                   xend = value), 
+               size = 0.5,
+               color = "black") + 
+  geom_point(stat='identity', size=3, colour=EF_green) +
+  labs(title="EQLS: Variable importance for random forest") +
+  theme_minimal() + theme(axis.title.y = element_blank())
+
+```
+
+```{r}
+ggplot(df2, aes(x=value,y=var)) +
+  facet_wrap(~variable, scales="free") +
+  geom_segment(aes(x = 0, 
+                   y = var, 
+                   yend = var, 
+                   xend = value), 
+               color = "black") + 
+  geom_point(stat='identity', size=5, colour=EF_green) +
+  scale_colour_manual(values=EF_green) + 
+  labs(title="EQLS: variable importance for random forest",
+       subtitle="Showing mean of mean decrease accuracy and mean decrease gini over the variables") +
+  theme_minimal() + theme(axis.title.y = element_blank())
+```
+
+Country is very important for the EQLS variables, followed up by agenum, make_ends_meet, ISCO, totalhour and who5. Although generally the differences in variable importance are not as outspoken as for the EWCS. 
+
+
+```{r}
+ggplot(df_varimp_eqls_m, aes(x=cvariable,y=value))+
+  facet_wrap(~stat, scales="free") +
+   geom_boxplot(fill=EF_green) + 
+   coord_flip() + 
+   labs(title="EQLS: Variable importance for random forest") +
+   theme_minimal() + theme(axis.title.y = element_blank())
+```
+
+```{r}
+ggplot(df2_med, aes(x=value,y=var)) +
+  facet_wrap(~variable, scales="free") +
+  geom_segment(aes(x = 0, 
+                   y = var, 
+                   yend = var, 
+                   xend = value), 
+               color = "black") + 
+  geom_point(stat='identity', size=5, colour=EF_green, shape=15) +
+  scale_colour_manual(values=EF_green) + 
+  labs(title="EQLS: Variable importance for random forest",
+       subtitle="Showing median of mean decrease accuracy and mean decrease gini over the variables") +
+  theme_minimal() + theme(axis.title.y = element_blank())
+
+```
+
+Looking at the medians, we come to the same conclusions. Commuting time could also be considered as more important. 
+
+#Summary
+This step shows the predictive power of the common variables X over the unique EWCS and EQLS variables Y and Z. Generally we can conclude that these variables seem to predict Y and Z reasonably well. It is unclear how well the common variable should predict the Y and Z variables, but to satisfy the CIA assumption we need to have matching variables that explain all the assocation between Y and Z. 
+
+For the EWCS the most important variables are: country, ISCO and totalhours, followed by empl_stat2, agenum, who5, commuting time and WorkLB.
+From the EQLS variable importance we know that country is important, followed up by agenum, make_ends_meet, ISCO, totalhour and who5
+
+The following order of importance will be considered for matching the EWCS variables:
+
+1. Country, ISCO and working hours
+2. empl_stat2, agenum, who5, and WorkLB. 
+3. commuting time, make ends meet
+
+For the purposes of matching, we have to consider matching within groups. Certain questions were only asked to respondents with children, explaning why having children is not an important explanatory variable. Also, country could be considered because of the survey design. Finally, if the goal of the analysis would also be to do a regression of work life balance (WorkLB) we may want to consider matching within the categories of WorkLB. 
+
+```{r}
+save(EQLS,file="EQLS_def.Rda")
+save(EWCS,file="EWCS_def.Rda")
+```

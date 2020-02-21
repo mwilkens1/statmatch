@@ -1,0 +1,11 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.sav
+*.dta
+*.Rda
+data
+selection_of_the_matching_variables_cache
+selection_of_the_matching_variables_files
+statistical_matching.zip
